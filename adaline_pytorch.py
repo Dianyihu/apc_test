@@ -7,17 +7,12 @@ Created by
 @time: 17:34
 '''
 
-import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-
+import pandas as pd
 import torch
+from pyswarm import pso
 from torch import nn
-from d2l import torch as d2l
 from torch.utils import data
-
-from functools import partial
 
 
 # ***************************************************
@@ -28,81 +23,93 @@ def synthetic_data(w, b, num_examples):
     y += torch.normal(0, 0.01, y.shape)
     return X, y
 
+
+def load_array(data_arrays, batch_size=1, is_train=False):
+    dataset = data.TensorDataset(*data_arrays)
+    return data.DataLoader(dataset, batch_size, shuffle=is_train)
+
+
+# ***************************************************
+
+class Metro_Worker:
+    def __init__(self):
+        pass
+
+    def find_eros_by_wafer(self, metro_operation=5150):
+        pass
+
+    def find_rec_from_time(self, t_point=None):
+        if t_point is None:
+            pass
+        else:
+            pass
+
+
 # ***************************************************
 
 class FP_Machine:
-    def __init__(self, model_path, name_dict):
-        self.in_features = name_dict['in_features']
-        self.profile_features = name_dict['profile_features']
+    def __init__(self, model_path, feature_dict, bounds_dict):
+        self.in_features = feature_dict['in_features']
+        self.out_features = feature_dict['out_features']
+        self.pre_features = feature_dict['pre_features']
+        self.post_features = feature_dict['post_features']
+        self.upper_bounds = bounds_dict['upper_bounds']
+        self.lower_bounds = bounds_dict['lower_bounds']
 
-        self.out_features = [f'Delta_Thk{loc}' for loc in name_dict['profile_features']]
-        self.pre_features = [f'Thk{loc}_5150' for loc in name_dict['profile_features']]
-        self.post_features = [f'Thk{loc}_6200' for loc in name_dict['profile_features']]
+        self.models = self.load_models(model_path)
+        self.rec_time = None
 
-        self.models = self.load_model_by_head(model_path)
-        self.records = None
+    def load_models(self, file_name):
+        return {head: torch.load(file_name) for head in [1, 2, 3, 4]}
 
-    def load_model_by_head(self, fname):
-        return {head: torch.load(fname) for head in [1,2,3,4]}
+    def update_models(self, train_data):
+        if len(train_data):
+            self.rec_time = train_data['proc_time'].max()
+            train_data.groupby('head').apply(self.update_model_by_head)
+        else:
+            print('New records cannot be found!')
 
-    def fetch_records(self):
-        pass
+    def update_model_by_head(self, batch, lr=0.001, num_epochs=3):
+        if len(batch):
+            head = batch['head'].iloc[0]
+            print(f'Head{head} model updating!')
 
-    def update_model_by_head(self, data, lr=0.01, num_epochs=1):
-        if len(data):
-            head = data['head'].iloc[0]
             loss = nn.MSELoss()
             trainer = torch.optim.SGD(self.models[head].parameters(), lr)
 
-            X_tensor = torch.from_numpy(data[self.in_features].values)
-            y_tensor = torch.from_numpy(data[self.out_features].values)
-
+            X_tensor = torch.from_numpy(batch[self.in_features].values).float()
+            y_tensor = torch.from_numpy(batch[self.out_features].values).float()
             for epoch in range(num_epochs):
-                for X, y in zip(X_tensor, y_tensor):
-                    l = loss(self.models[head](X), y)
-                    trainer.zero_grad()
-                    l.backward()
-                    trainer.step()
+                l = loss(self.models[head](X_tensor), y_tensor)
+                trainer.zero_grad()
+                l.backward()
+                trainer.step()
+                print(f'epoch {epoch + 1}, loss: {l:.2f}')
+                print(self.models[head].state_dict()['0.weight'].numpy().reshape(-1))
 
-    def predict_tar_by_head(self, data):
-        if len(data):
-            head = data['head'].iloc[0]
-            data[self.out_features] = self.model_predict(self.models[head], data[self.in_features].values)
+    def loss_fun(self, z_list, head, pre_values):
+        return self.elp_distance(np.array(pre_values) + self.model_predict(head, np.array(z_list)))
 
-        return data
+    def recom_pressure(self, head, pre_values):
+        p_opt, _ = pso(self.loss_fun, lb=self.lower_bounds, ub=self.upper_bounds,
+                       args=(head, pre_values), minfunc=0.1, maxiter=10)
 
-    def loss_fun(self, ser):
-        if len(self.out_features)==3:
-            out_features = self.model_predict(self.models[ser['head']], ser[self.in_features].values).reshape(-1)
-            post_features = out_features + ser[self.pre_features].values.reshape(-1)
-            ero120_6200 = -post_features[1]-(120-self.profile_features[1])*(post_features[1]-post_features[0])/(self.profile_features[1]-self.profile_features[0])
-            ero148_6200 = post_features[2]-post_features[1]-(148-self.profile_features[1])*(post_features[1]-post_features[0])/(self.profile_features[1]-self.profile_features[0])
+        return p_opt
 
-            return self.elp_distance(np.array([ero120_6200, ero148_6200]))[0]
-
-    def elp_distance(X, center=(0,0), theta=0, w1=1, w2=1):
+    def elp_distance(self, X, center=(0, 0), theta=0, w1=1, w2=1):
         theta = np.deg2rad(theta)
-        scale = np.array([[w1/(w1+w2), 0],
-                          [0, w2/(w1+w2)]])
+        scale = np.array([[w1 / (w1 + w2), 0],
+                          [0, w2 / (w1 + w2)]])
         rotation = np.array([[np.cos(theta), np.sin(theta)],
-                        [-np.sin(theta), np.cos(theta)]])
+                             [-np.sin(theta), np.cos(theta)]])
 
-        return np.sum(np.square(scale@rotation@(X-center).T), axis=0)
+        return np.sum(np.square(scale @ rotation @ (X - center).T), axis=0)
 
-    def model_predict(self, model, X):
+    def model_predict(self, head, X):
         with torch.no_grad():
-            y = model(torch.from_numpy(X))
+            y = self.models[head](torch.from_numpy(X).float())
 
         return y.numpy()
-
-    def plot_dist(self, x, y):
-        xx = np.linspace(x.min(),x.max(),50)
-        yy = np.linspace(y.min(),y.max(),50)
-        X,Y = np.meshgrid(xx,yy)
-
-        dist = self.elp_distance(np.vstack([X.flat, Y.flat]).T).reshape(50,50)
-
-        plt.contour(X,Y,dist)
 
 
 # ***************************************************
@@ -128,7 +135,8 @@ class Ada_Regressor:
                 trainer.zero_grad()
                 l.backward()
                 trainer.step()
-            print(f'epoch {epoch+1}, loss {l:f}')
+            print(f'epoch {epoch + 1}, loss {l:f}')
+            print(self.net.state_dict()['0.weight'].numpy().reshape(-1))
 
     def net_predict(self, X):
         with torch.no_grad():
@@ -142,81 +150,43 @@ class Ada_Regressor:
     def load_net(self):
         return torch.load('./adaline_net.pkl')
 
+
 # ***************************************************
 
-def load_array(data_arrays, batch_size=1, is_train=False):
-    dataset = data.TensorDataset(*data_arrays)
-    return data.DataLoader(dataset, batch_size, shuffle=is_train)
+true_w = torch.tensor([[2, -3.4], [1.5, -1]])
+true_b = 4.2
+features, labels = synthetic_data(true_w, true_b, 1000)
 
-
-# true_w = torch.tensor([[2,-3.4,3],[1.5,-1,3]])
-# true_b = 4.2
-# features, labels = synthetic_data(true_w, true_b, 1000)
-#
-# ada_regressor = Ada_Regressor()
+# ada_regressor = Ada_Regressor(in_features=2, out_features=2)
 # ada_regressor.update_net(zip(features[:10,:], labels[:10,:]), 0.1)
-#
-#
-# for param in ada_regressor.net.parameters():
-#   print(param.data)
-#
-#
-#
-# testDistance = np.array([1,2])
-#
-# fpMachine = FP_Machine()
-#
-# test = fpMachine.elp_distance(testDistance)
-# print(test)
-#
-#
-# x = np.linspace(-10,10,100)
-# y = np.linspace(-10,10,100)
-#
-# X,Y = np.meshgrid(x,y)
-#
-# test2 = np.vstack([X.flat, Y.flat]).T
-#
-# test = fpMachine.elp_distance(test2)
-# print(test.reshape(100,100))
-#
-# plt.contour(X,Y,test.reshape(100,100))
-# plt.show()
+# ada_regressor.save_net()
 
 
-model_path = './adaline_net.pkl'
+testDf = pd.DataFrame(columns=['proc_time', 'head', 'z1Pressure', 'z2Pressure', 'delta_ERO120', 'delta_ERO148',
+                               'ERO120_5150', 'ERO148_5150', 'ERO120_6200', 'ERO148_6200'])
 
-def elp_distance(X, center=(0,0), theta=20, w1=1, w2=2.5):
-    px, py, theta = center[0], center[1], np.deg2rad(theta)
-    T = [[np.cos(theta), -np.sin(theta), px*(1-np.cos(theta))+py*np.sin(theta)],
-         [np.sin(theta),  np.cos(theta), py*(1-np.cos(theta))-px*np.sin(theta)],
-         [0, 0, 1]]
+testDf['head'] = [1, 2, 3, 4] * 250
+testDf['proc_time'] = pd.date_range(end='1/1/2024', periods=len(features))
+testDf[['z1Pressure', 'z2Pressure']] = features.numpy()
+testDf[['delta_ERO120', 'delta_ERO148']] = labels.numpy()
+testDf[['ERO120_5150', 'ERO148_5150']] = np.random.normal(size=(len(features), 2))
+testDf[['ERO120_6200', 'ERO148_6200']] = np.nan
 
-    scale = np.array([[w1/(w1+w2), 0], [0, w2/(w1+w2)]])
-    rotation = np.array([[np.cos(theta), np.sin(theta)],
-                         [-np.sin(theta), np.cos(theta)]])
+feature_dict = {
+    'in_features': ['z1Pressure', 'z2Pressure'],
+    'out_features': ['delta_ERO120', 'delta_ERO148'],
+    'pre_features': ['ERO120_5150', 'ERO148_5150'],
+    'post_features': ['ERO120_6200', 'ERO148_6200'],
+}
 
-    X_prime = rotation@scale@X.T
+bounds_dict = {
+    'upper_bounds': [7.5, 3.72],
+    'lower_bounds': [6.2, 3.62],
+}
 
-    print(X_prime.T)
+fpMachine = FP_Machine('adaline_net.pkl', feature_dict, bounds_dict)
+fpMachine.update_models(testDf)
 
-    return np.sum(np.square(X_prime.T).reshape(-1, 2), axis=1)
-    # return X_prime
-
-def plot_dist(x, y, dist_fun):
-    xx = np.linspace(x.min(),x.max(),50)
-    yy = np.linspace(y.min(),y.max(),50)
-    X,Y = np.meshgrid(xx,yy)
-
-    dist = dist_fun(np.vstack([X.flat, Y.flat]).T).reshape(50,50)
-
-    plt.contour(X,Y,dist,levels=np.arange(20,200,20))
-
-
-dist_fun = partial(elp_distance, center=(70,0), theta=20, w1=1, w2=2.5)
-plot_dist(np.linspace(-50,50), np.linspace(-80,20,20), dist_fun)
-plt.show()
-
-# test = elp_distance(np.array([1,2]), center=(4,-25), theta=60, w1=1, w2=2.5)
-# print(np.square(test))
-# print(np.sum(np.square(test)))
+# for _, wafer in testDf.iterrows():
+#     p = fpMachine.recom_pressure(wafer['head'], wafer[['ERO120_5150', 'ERO148_5150']])
+#     print(f'Recommeding z1z2 pressure: {p}')
