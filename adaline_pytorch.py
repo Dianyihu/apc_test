@@ -17,6 +17,8 @@ from torch import nn
 from d2l import torch as d2l
 from torch.utils import data
 
+from functools import partial
+
 
 # ***************************************************
 
@@ -78,15 +80,14 @@ class FP_Machine:
 
             return self.elp_distance(np.array([ero120_6200, ero148_6200]))[0]
 
-    def elp_distance(self, X, center=(0,0), theta=0, w1=1, w2=1):
-        theta = theta*np.pi/180
-        scale = np.array([[w1/(w1+w2), 0], [0, w2/(w1+w2)]])
-        rotation = np.array([[np.cos(theta), -np.sin(theta)],
-                             [np.sin(theta), np.cos(theta)]])
+    def elp_distance(X, center=(0,0), theta=0, w1=1, w2=1):
+        theta = np.deg2rad(theta)
+        scale = np.array([[w1/(w1+w2), 0],
+                          [0, w2/(w1+w2)]])
+        rotation = np.array([[np.cos(theta), np.sin(theta)],
+                        [-np.sin(theta), np.cos(theta)]])
 
-        X_prime = rotation@scale@(X-center).T
-
-        return np.sum(np.square(X_prime.T).reshape(-1, 2), axis=1)
+        return np.sum(np.square(scale@rotation@(X-center).T), axis=0)
 
     def model_predict(self, model, X):
         with torch.no_grad():
@@ -181,4 +182,41 @@ def load_array(data_arrays, batch_size=1, is_train=False):
 #
 # plt.contour(X,Y,test.reshape(100,100))
 # plt.show()
-#
+
+
+model_path = './adaline_net.pkl'
+
+def elp_distance(X, center=(0,0), theta=20, w1=1, w2=2.5):
+    px, py, theta = center[0], center[1], np.deg2rad(theta)
+    T = [[np.cos(theta), -np.sin(theta), px*(1-np.cos(theta))+py*np.sin(theta)],
+         [np.sin(theta),  np.cos(theta), py*(1-np.cos(theta))-px*np.sin(theta)],
+         [0, 0, 1]]
+
+    scale = np.array([[w1/(w1+w2), 0], [0, w2/(w1+w2)]])
+    rotation = np.array([[np.cos(theta), np.sin(theta)],
+                         [-np.sin(theta), np.cos(theta)]])
+
+    X_prime = rotation@scale@X.T
+
+    print(X_prime.T)
+
+    return np.sum(np.square(X_prime.T).reshape(-1, 2), axis=1)
+    # return X_prime
+
+def plot_dist(x, y, dist_fun):
+    xx = np.linspace(x.min(),x.max(),50)
+    yy = np.linspace(y.min(),y.max(),50)
+    X,Y = np.meshgrid(xx,yy)
+
+    dist = dist_fun(np.vstack([X.flat, Y.flat]).T).reshape(50,50)
+
+    plt.contour(X,Y,dist,levels=np.arange(20,200,20))
+
+
+dist_fun = partial(elp_distance, center=(70,0), theta=20, w1=1, w2=2.5)
+plot_dist(np.linspace(-50,50), np.linspace(-80,20,20), dist_fun)
+plt.show()
+
+# test = elp_distance(np.array([1,2]), center=(4,-25), theta=60, w1=1, w2=2.5)
+# print(np.square(test))
+# print(np.sum(np.square(test)))
